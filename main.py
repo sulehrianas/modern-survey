@@ -1,10 +1,16 @@
-# Main application entry point
 import sys
 from PyQt6.QtWidgets import QApplication
-from ui.main_window import MainWindow
+from ui.gps_tab import GpsTab
+
+def main():
+    app = QApplication(sys.argv)
+    
+    window = GpsTab()
+    window.setWindowTitle("Modern Survey")
+    window.resize(1200, 800)
+    window.show()
+    
+    sys.exit(app.exec())
 
 if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    main_win = MainWindow()
-    main_win.show()
-    sys.exit(app.exec())
+    main()

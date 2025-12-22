@@ -1,24 +1,23 @@
 # Modern Survey
 
-A Python-based GPS Surveying and Coordinate Conversion tool.
-
-## Features
-- Coordinate conversion (EPSG codes)
-- Import/Export CSV
-- Export to KML (Google Earth)
-- UTM Zone helper
+## Overview
+Modern Survey is a desktop application built with Python and PyQt6.
 
 ## Installation
 
-1. Clone the repository.
-2. Install dependencies:
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/sulehrianas/modern-survey.git
+   cd modern-survey
+   ```
+
+2. **Install dependencies:**
    ```bash
    pip install -r requirements.txt
    ```
 
 ## Usage
-
-Run the application from the main entry point:
+To launch the application, run:
 ```bash
 python main.py
 ```

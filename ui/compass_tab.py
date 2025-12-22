@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QTableWidgetItem,
     QInputDialog,
+    QScrollArea,
 )
 from PyQt6.QtCore import Qt
 import numpy as np
@@ -34,8 +35,17 @@ class CompassTab(QWidget):
     def __init__(self):
         super().__init__()
 
+        # --- Scroll Area Setup ---
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        outer_layout.addWidget(scroll)
+        content_widget = QWidget()
+        scroll.setWidget(content_widget)
+
         # --- Main Layout ---
-        main_layout = QHBoxLayout(self)
+        main_layout = QHBoxLayout(content_widget)
         main_layout.setContentsMargins(10, 10, 10, 10)
         main_layout.setSpacing(10)
 

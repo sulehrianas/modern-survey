@@ -13,7 +13,10 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QComboBox,
-    QDoubleSpinBox
+    QDoubleSpinBox,
+    QFileDialog,
+    QCheckBox,
+    QScrollArea
 )
 from PyQt6.QtWidgets import QTableWidgetItem
 from PyQt6.QtGui import QColor
@@ -37,7 +40,15 @@ class TheodoliteTab(QWidget):
 
     def setup_ui(self):
         """Initializes the user interface for the tab."""
-        main_layout = QHBoxLayout(self)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        outer_layout.addWidget(scroll)
+        content_widget = QWidget()
+        scroll.setWidget(content_widget)
+
+        main_layout = QHBoxLayout(content_widget)
         main_layout.setContentsMargins(10, 10, 10, 10)
         main_layout.setSpacing(10)
 
@@ -123,13 +134,22 @@ class TheodoliteTab(QWidget):
         controls_layout.addWidget(self.angle_type_combo)
         controls_layout.addSpacing(20)
 
+        # Show Plot Checkbox
+        self.show_plot_checkbox = QCheckBox("Show Traverse Plot")
+        self.show_plot_checkbox.setChecked(False)
+        self.show_plot_checkbox.stateChanged.connect(self.toggle_plot_visibility)
+        controls_layout.addWidget(self.show_plot_checkbox)
+        controls_layout.addSpacing(10)
+
         # Action Buttons
         self.import_csv_button = self.create_styled_button("Import from CSV", "#007BFF")
         self.calculate_button = self.create_styled_button("Calculate Traverse", "#28A745")
+        self.save_plot_button = self.create_styled_button("Save Plot", "#17A2B8")
         self.clear_button = self.create_styled_button("Clear All", "#FFC107", text_color="#000000")
         
         controls_layout.addWidget(self.import_csv_button)
         controls_layout.addWidget(self.calculate_button)
+        controls_layout.addWidget(self.save_plot_button)
         controls_layout.addWidget(self.clear_button)
         controls_layout.addSpacing(20)
 
@@ -163,6 +183,7 @@ class TheodoliteTab(QWidget):
         self.table.itemChanged.connect(self.handle_table_item_changed)
         self.add_row_button.clicked.connect(self.add_row)
         self.remove_row_button.clicked.connect(self.remove_row)
+        self.save_plot_button.clicked.connect(self.handle_save_plot)
         self.clear_button.clicked.connect(self.handle_clear)
         self.import_csv_button.clicked.connect(self.handle_import_csv)
         self.export_csv_button.clicked.connect(self.handle_export_csv)
@@ -299,6 +320,9 @@ class TheodoliteTab(QWidget):
                 "Precision": f"1 in {precision:,.0f}"
             }
             self.final_coords = final_coords
+
+            # Update the plot
+            self.plot_widget.plot_traverse(self.final_coords, title="Theodolite Traverse")
 
             QMessageBox.information(self, "Calculation Complete", "Theodolite traverse calculation finished successfully.")
 
@@ -449,6 +473,21 @@ class TheodoliteTab(QWidget):
             QMessageBox.information(self, "Success", f"KML file successfully saved to {file_path}")
         except Exception as e:
             QMessageBox.critical(self, "Export Error", f"Failed to generate KML file: {e}")
+
+    def toggle_plot_visibility(self, state):
+        """Shows or hides the plot group based on the checkbox state."""
+        is_visible = (state == Qt.CheckState.Checked.value)
+        self.plot_group.setVisible(is_visible)
+
+    def handle_save_plot(self):
+        """Saves the current traverse plot to a file."""
+        if not self.plot_group.isVisible() or not self.final_coords:
+            QMessageBox.warning(self, "Save Plot Error", "No plot is currently visible or calculated to save.")
+            return
+        file_path, _ = QFileDialog.getSaveFileName(self, "Save Plot", "", "Image Files (*.png *.jpg *.pdf);;All Files (*)")
+        if file_path:
+            self.plot_widget.figure.savefig(file_path, dpi=300, bbox_inches='tight')
+            QMessageBox.information(self, "Success", f"Plot saved to {file_path}")
 
     def create_styled_button(self, text, bg_color, text_color="#FFFFFF"):
         """Factory function to create a styled QPushButton."""

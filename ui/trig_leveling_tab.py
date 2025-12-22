@@ -4,7 +4,7 @@ UI for the Trigonometric Leveling tab.
 from PyQt6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QGroupBox, QTableWidget, QPushButton,
     QLabel, QHeaderView, QLineEdit, QMessageBox, QComboBox, QDoubleSpinBox,
-    QTableWidgetItem, QFileDialog, QInputDialog
+    QTableWidgetItem, QFileDialog, QInputDialog, QScrollArea
 )
 from PyQt6.QtGui import QColor
 from PyQt6.QtCore import Qt
@@ -28,7 +28,15 @@ class TrigLevelingTab(QWidget):
 
     def setup_ui(self):
         """Initializes the user interface for the tab."""
-        main_layout = QHBoxLayout(self)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        outer_layout.addWidget(scroll)
+        content_widget = QWidget()
+        scroll.setWidget(content_widget)
+
+        main_layout = QHBoxLayout(content_widget)
         main_layout.setContentsMargins(10, 10, 10, 10)
         main_layout.setSpacing(10)
 

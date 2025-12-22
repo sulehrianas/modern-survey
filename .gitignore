@@ -1,16 +1,10 @@
-# Python cache
 __pycache__/
 *.py[cod]
-
-# Virtual environments
+*$py.class
 venv/
+env/
 .venv/
-
-# IDE settings
 .vscode/
 .idea/
-
-# PyInstaller build artifacts
-build/
+*.log
 dist/
-*.spec

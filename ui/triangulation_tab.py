@@ -2,7 +2,8 @@
 from PyQt6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QGroupBox, QTableWidget, QPushButton,
     QLabel, QLineEdit, QMessageBox, QTableWidgetItem, QComboBox, QHeaderView, QFileDialog,
-    QDoubleSpinBox, QCheckBox, QTextEdit, QInputDialog, QTabWidget, QStackedWidget
+    QDoubleSpinBox, QCheckBox, QTextEdit, QInputDialog, QTabWidget, QStackedWidget,
+    QScrollArea
 )
 from PyQt6.QtGui import QTextDocument
 from PyQt6.QtPrintSupport import QPrinter
@@ -40,7 +41,15 @@ class TriangulationTab(QWidget):
         layout.addWidget(self.tabs)
 
     def setup_chain_ui(self, parent):
-        main_layout = QHBoxLayout(parent)
+        outer_layout = QVBoxLayout(parent)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        outer_layout.addWidget(scroll)
+        content_widget = QWidget()
+        scroll.setWidget(content_widget)
+
+        main_layout = QHBoxLayout(content_widget)
         
         # --- Left Panel: Data Entry & Plot ---
         left_layout = QVBoxLayout()
@@ -175,7 +184,15 @@ class TriangulationTab(QWidget):
         self.update_angle_headers()
 
     def setup_quad_ui(self, parent):
-        layout = QHBoxLayout(parent)
+        outer_layout = QVBoxLayout(parent)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        outer_layout.addWidget(scroll)
+        content_widget = QWidget()
+        scroll.setWidget(content_widget)
+
+        layout = QHBoxLayout(content_widget)
         
         # Left: Inputs
         left = QVBoxLayout()
@@ -584,7 +601,8 @@ class TriangulationTab(QWidget):
         # Solve for C using Sine Rule (Intersection of two rays)
         # Angle at C = 180 - (A + B)
         ang_c = 180 - (ang_a_dd + ang_b_dd)
-        if ang_c <= 0.001: return 0.0, 0.0 # Invalid geometry
+        if ang_c <= 0.001:
+            raise ValueError("Invalid geometry: The sum of angles for the intersection is >= 180 degrees.")
         
         # Dist AC / sin(B) = Dist AB / sin(C)
         dist_ac = dist_ab * math.sin(math.radians(ang_b_dd)) / math.sin(math.radians(ang_c))

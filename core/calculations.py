@@ -73,6 +73,9 @@ def calculate_lat_dep(azimuths, distances, angle_format='dd'):
     # Convert azimuths from decimal degrees to radians for numpy trigonometric functions
     azimuths_rad = np.deg2rad(azimuths_dd)
 
+    # Ensure distances is a numpy array for element-wise multiplication
+    distances = np.array(distances)
+
     # Latitude = Distance * cos(Azimuth)
     latitudes = distances * np.cos(azimuths_rad)
 

@@ -21,9 +21,10 @@ st.title("Modern Survey - Web Edition")
 st.markdown("Perform survey calculations directly in your browser.")
 
 # --- Tabs ---
-tab_compass, tab_level, tab_trig, tab_tri, tab_conv = st.tabs([
-    "Compass Traversing", 
-    "Differential Leveling", 
+tab_compass, tab_theo, tab_level, tab_trig, tab_tri, tab_conv = st.tabs([
+    "Compass Traversing",
+    "Theodolite Traversing",
+    "Differential Leveling",
     "Trigonometric Leveling", 
     "Triangulation", 
     "Coordinate Conversion"
@@ -89,7 +90,83 @@ with tab_compass:
             st.error(f"Error: {e}")
 
 # ==========================================
-# 2. DIFFERENTIAL LEVELING TAB
+# 2. THEODOLITE TRAVERSING TAB
+# ==========================================
+with tab_theo:
+    st.header("Theodolite Traversing")
+    st.markdown("Calculate coordinates using **Horizontal Angles** and Distances.")
+
+    t_col1, t_col2, t_col3 = st.columns(3)
+    with t_col1:
+        theo_start_e = st.number_input("Start Easting (m)", value=1000.0, format="%.3f", key="theo_e")
+    with t_col2:
+        theo_start_n = st.number_input("Start Northing (m)", value=1000.0, format="%.3f", key="theo_n")
+    with t_col3:
+        start_az_str = st.text_input("Reference Azimuth (DD.MMSS)", value="0.0000")
+
+    st.subheader("Field Observations")
+    
+    # Initial Data for Theodolite
+    theo_data = {
+        "Station": ["A", "B", "C", "D"],
+        "Distance (m)": [100.0, 120.0, 100.0, 120.0],
+        "Horiz. Angle (DD.MMSS)": ["90.0000", "90.0000", "90.0000", "90.0000"]
+    }
+    theo_df = st.data_editor(pd.DataFrame(theo_data), num_rows="dynamic", use_container_width=True, key="theo_editor")
+
+    if st.button("Calculate Theodolite Traverse"):
+        try:
+            # Inputs
+            dists = theo_df["Distance (m)"].astype(float).tolist()
+            angles_str = theo_df["Horiz. Angle (DD.MMSS)"].astype(str).tolist()
+            
+            # Convert Start Azimuth to Decimal Degrees
+            current_az = dms_to_dd(float(start_az_str))
+            
+            calculated_azimuths = []
+            
+            # Calculate Azimuths from Angles
+            # Rule: New Azimuth = Previous Azimuth + Angle - 180 (if sum > 180) or + 180 (if sum < 180)
+            # This is a simplified "Angles to the Right" assumption.
+            for ang_str in angles_str:
+                angle_dd = dms_to_dd(float(ang_str))
+                az = current_az + angle_dd
+                
+                # Normalize logic (Basic Traverse)
+                if az >= 180:
+                    az -= 180
+                else:
+                    az += 180
+                
+                # Normalize to 0-360
+                az = az % 360
+                
+                calculated_azimuths.append(dd_to_dms(az)) # Store as DMS string for consistency with core functions
+                current_az = az # Set for next leg
+
+            # 1. Calculate Lat/Dep using the calculated azimuths
+            lats, deps = calculate_lat_dep(calculated_azimuths, dists, angle_format='dms')
+            
+            # 2. Adjust (Bowditch)
+            adj_lats, adj_deps, corr_lat, corr_dep = adjust_traverse_bowditch(dists, lats, deps)
+            
+            # 3. Calculate Coordinates
+            coords = calculate_coordinates(theo_start_n, theo_start_e, adj_lats, adj_deps)
+            
+            # Display Results
+            res_data = []
+            for i, (e, n) in enumerate(coords):
+                stn = theo_df.iloc[i]["Station"] if i < len(theo_df) else "End"
+                res_data.append({"Station": stn, "Easting": e, "Northing": n, "Calc Azimuth": calculated_azimuths[i] if i < len(calculated_azimuths) else "-"})
+            
+            st.success("Theodolite Traverse Calculated")
+            st.dataframe(pd.DataFrame(res_data), use_container_width=True)
+
+        except Exception as e:
+            st.error(f"Calculation Error: {e}")
+
+# ==========================================
+# 3. DIFFERENTIAL LEVELING TAB
 # ==========================================
 with tab_level:
     st.header("Differential Leveling")

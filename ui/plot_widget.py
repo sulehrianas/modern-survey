@@ -46,7 +46,7 @@ class PlotWidget(QWidget):
         # Label the points with their names and coordinates
         for i, (e, n) in enumerate(points):
             label = "Start" if i == 0 else f"P{i}"
-            self.axes.text(e, n, f' {label}\n E: {e:.3f}\n N: {n:.3f}', fontsize=8, va='bottom', ha='left')
+            self.axes.text(e, n, f' {label}', fontsize=8, va='bottom', ha='left')
 
         self.axes.set_xlabel("Easting (m)")
         self.axes.set_ylabel("Northing (m)")

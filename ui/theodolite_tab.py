@@ -18,12 +18,13 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QScrollArea
 )
-from PyQt6.QtWidgets import QTableWidgetItem
+from PyQt6.QtWidgets import QTableWidgetItem, QTabWidget
 from PyQt6.QtGui import QColor
 from PyQt6.QtCore import Qt
 import numpy as np
 import pandas as pd
 import math
+import io
 
 from .plot_widget import PlotWidget
 from core.calculations import dms_to_dd, dd_to_dms, calculate_lat_dep, calculate_coordinates
@@ -32,6 +33,23 @@ from data_services.csv_handler import import_csv_to_dataframe, export_dataframe_
 from data_services.pdf_reporter import generate_theodolite_report
 from data_services.kml_exporter import export_to_kml
 from core.coordinate_converter import convert_to_global
+
+FOLIUM_ERROR = None
+try:
+    import folium
+    FOLIUM_AVAILABLE = True
+except ImportError as e:
+    FOLIUM_AVAILABLE = False
+    FOLIUM_ERROR = str(e)
+
+WEB_ENGINE_ERROR = None
+try:
+    from PyQt6.QtWebEngineWidgets import QWebEngineView
+    WEB_ENGINE_AVAILABLE = True
+except ImportError as e:
+    WEB_ENGINE_AVAILABLE = False
+    WEB_ENGINE_ERROR = str(e)
+
 
 class TheodoliteTab(QWidget):
     def __init__(self):
@@ -100,13 +118,33 @@ class TheodoliteTab(QWidget):
         data_layout.addLayout(row_mgmt_layout)
         left_layout.addWidget(data_group)
 
-        # Plot Group
-        self.plot_group = QGroupBox("Traverse Plot")
-        plot_layout = QVBoxLayout(self.plot_group)
+        # Visualization Group (Plot + Map)
+        self.viz_group = QGroupBox("Visualization")
+        viz_layout = QVBoxLayout(self.viz_group)
+        
+        self.viz_tabs = QTabWidget()
+        
+        # Tab 1: Plot
         self.plot_widget = PlotWidget()
-        plot_layout.addWidget(self.plot_widget)
-        left_layout.addWidget(self.plot_group)
-        self.plot_group.setVisible(False) # Hidden by default
+        self.viz_tabs.addTab(self.plot_widget, "Traverse Plot")
+        
+        # Tab 2: Map
+        if not FOLIUM_AVAILABLE:
+            self.map_view = QLabel(f"Error importing 'folium':\n{FOLIUM_ERROR}\n\nTry running:\npython -m pip install folium")
+            self.map_view.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.map_view.setStyleSheet("color: red; font-weight: bold;")
+            self.map_view.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        elif WEB_ENGINE_AVAILABLE:
+            self.map_view = QWebEngineView()
+        else:
+            self.map_view = QLabel(f"Error importing 'PyQt6-WebEngine':\n{WEB_ENGINE_ERROR}\n\nTry running:\npython -m pip install PyQt6-WebEngine")
+            self.map_view.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.map_view.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.viz_tabs.addTab(self.map_view, "Google Map")
+        
+        viz_layout.addWidget(self.viz_tabs)
+        left_layout.addWidget(self.viz_group)
+        self.viz_group.setVisible(False) # Hidden by default
 
         # --- Right Side: Controls & Results ---
         right_layout = QVBoxLayout()
@@ -119,7 +157,6 @@ class TheodoliteTab(QWidget):
         self.angle_format_combo = QComboBox()
         self.angle_format_combo.addItems(["DD.MMSS", "Decimal Degrees"])
         self.angle_format_combo.currentIndexChanged.connect(self.update_angle_headers)
-        self.update_angle_headers() # Call it here after initialization
         controls_layout.addWidget(self.angle_format_combo)
         controls_layout.addSpacing(10)
 
@@ -131,14 +168,22 @@ class TheodoliteTab(QWidget):
         controls_layout.addWidget(QLabel("Measured Angles:"))
         self.angle_type_combo = QComboBox()
         self.angle_type_combo.addItems(["Interior (Angles-to-the-Right)", "Exterior Angles"])
+        self.angle_type_combo.currentIndexChanged.connect(self.update_angle_headers)
         controls_layout.addWidget(self.angle_type_combo)
+        self.update_angle_headers() # Call it here after initialization
         controls_layout.addSpacing(20)
 
-        # Show Plot Checkbox
-        self.show_plot_checkbox = QCheckBox("Show Traverse Plot")
-        self.show_plot_checkbox.setChecked(False)
-        self.show_plot_checkbox.stateChanged.connect(self.toggle_plot_visibility)
-        controls_layout.addWidget(self.show_plot_checkbox)
+        # EPSG Input for Map
+        controls_layout.addWidget(QLabel("EPSG Code (for Map):"))
+        self.epsg_input = QLineEdit("32632")
+        controls_layout.addWidget(self.epsg_input)
+        controls_layout.addSpacing(10)
+
+        # Show Visualization Checkbox
+        self.show_viz_checkbox = QCheckBox("Show Visualization")
+        self.show_viz_checkbox.setChecked(False)
+        self.show_viz_checkbox.stateChanged.connect(self.toggle_viz_visibility)
+        controls_layout.addWidget(self.show_viz_checkbox)
         controls_layout.addSpacing(10)
 
         # Action Buttons
@@ -195,11 +240,11 @@ class TheodoliteTab(QWidget):
         self.table.setColumnCount(11)
         self.table.setHorizontalHeaderLabels([
             "Line",
-            "Horizontal Angle", "Upper Stadia", "Lower Stadia",
-            "Vert. Angle", 
-            "Distance (m)", 
-            "Azimuth", "Latitude", "Departure", 
-            "Adj. Easting", "Adj. Northing"
+            "Horiz. Angle", "U. Stadia", "L. Stadia",
+            "V. Angle",
+            "Dist. (m)",
+            "Azimuth", "Lat.", "Dep.",
+            "Adj. E", "Adj. N"
         ])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table.setRowCount(10)
@@ -210,9 +255,16 @@ class TheodoliteTab(QWidget):
 
     def update_angle_headers(self):
         """Updates the table headers to reflect the selected angle format."""
-        angle_format = self.angle_format_combo.currentText()
-        self.table.horizontalHeaderItem(1).setText(f"Horizontal Angle ({angle_format})")
-        self.table.horizontalHeaderItem(4).setText(f"Vertical Angle ({angle_format})")
+        angle_type = self.angle_type_combo.currentText()
+
+        horiz_angle_label = "Horiz. Angle"
+        if "Interior" in angle_type:
+            horiz_angle_label = "Int. Angle"
+        elif "Exterior" in angle_type:
+            horiz_angle_label = "Ext. Angle"
+
+        self.table.horizontalHeaderItem(1).setText(f"{horiz_angle_label}")
+        self.table.horizontalHeaderItem(4).setText("V. Angle")
 
     def read_input_data_from_table(self):
         """Reads and validates data from the QTableWidget."""
@@ -323,6 +375,9 @@ class TheodoliteTab(QWidget):
 
             # Update the plot
             self.plot_widget.plot_traverse(self.final_coords, title="Theodolite Traverse")
+
+            # Update the map
+            self.update_map_view(self.final_coords)
 
             QMessageBox.information(self, "Calculation Complete", "Theodolite traverse calculation finished successfully.")
 
@@ -442,11 +497,15 @@ class TheodoliteTab(QWidget):
             QMessageBox.warning(self, "Export Error", "Please run a calculation to generate coordinates first.")
             return
 
-        from PyQt6.QtWidgets import QInputDialog
-        epsg_code, ok = QInputDialog.getInt(self, "Coordinate System", "Enter EPSG code for your UTM Zone:", 32632)
-        if not ok: return
+        try:
+            epsg_code = int(self.epsg_input.text())
+        except ValueError:
+            QMessageBox.critical(self, "Input Error", "Invalid EPSG code. Please enter a number.")
+            return
 
         try:
+            if not self.final_coords:
+                raise ValueError("No final coordinates available for conversion.")
             # The coordinates are (Easting, Northing), which is (x, y)
             local_points = [(coord[0], coord[1]) for coord in self.final_coords]
             
@@ -474,14 +533,55 @@ class TheodoliteTab(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "Export Error", f"Failed to generate KML file: {e}")
 
-    def toggle_plot_visibility(self, state):
-        """Shows or hides the plot group based on the checkbox state."""
+    def update_map_view(self, coords):
+        """Updates the Google Map with the calculated coordinates."""
+        if not hasattr(self, 'map_view') or not FOLIUM_AVAILABLE or not WEB_ENGINE_AVAILABLE:
+            return
+            
+        try:
+            epsg = int(self.epsg_input.text())
+            # coords is list of (E, N). convert_to_global returns list of (lon, lat)
+            global_pts = convert_to_global(coords, epsg)
+            
+            if not global_pts: return
+            
+            # Calculate center
+            avg_lat = sum(p[1] for p in global_pts) / len(global_pts)
+            avg_lon = sum(p[0] for p in global_pts) / len(global_pts)
+            
+            m = folium.Map(location=[avg_lat, avg_lon], zoom_start=18)
+            
+            folium.TileLayer('https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}', attr='Google', name='Google Maps (Roads)').add_to(m)
+            folium.TileLayer('https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', attr='Google', name='Google Maps (Satellite)').add_to(m)
+            
+            # Draw Line (Folium needs Lat, Lon)
+            route = [(p[1], p[0]) for p in global_pts]
+            folium.PolyLine(route, color="blue", weight=3, opacity=0.8).add_to(m)
+            
+            # Markers
+            for i, pt in enumerate(global_pts):
+                line_item = self.table.item(i-1, 0) if i > 0 else None
+                point_name = line_item.text() if line_item and line_item.text() else f"Point {i}"
+                if i == 0: point_name = "Start Point"
+                folium.Marker([pt[1], pt[0]], popup=point_name, tooltip=point_name).add_to(m)
+                
+            folium.LayerControl().add_to(m)
+            
+            data = io.BytesIO()
+            m.save(data, close_file=False)
+            self.map_view.setHtml(data.getvalue().decode())
+            
+        except Exception as e:
+            print(f"Map Update Error: {e}")
+
+    def toggle_viz_visibility(self, state):
+        """Shows or hides the visualization group based on the checkbox state."""
         is_visible = (state == Qt.CheckState.Checked.value)
-        self.plot_group.setVisible(is_visible)
+        self.viz_group.setVisible(is_visible)
 
     def handle_save_plot(self):
         """Saves the current traverse plot to a file."""
-        if not self.plot_group.isVisible() or not self.final_coords:
+        if not self.viz_group.isVisible() or not self.final_coords:
             QMessageBox.warning(self, "Save Plot Error", "No plot is currently visible or calculated to save.")
             return
         file_path, _ = QFileDialog.getSaveFileName(self, "Save Plot", "", "Image Files (*.png *.jpg *.pdf);;All Files (*)")
@@ -530,3 +630,5 @@ class TheodoliteTab(QWidget):
         self.table.setRowCount(10)
         self.results_label.setText("Results will be shown here.")
         self.plot_widget.clear_plot()
+        if WEB_ENGINE_AVAILABLE and hasattr(self, 'map_view') and isinstance(self.map_view, QWebEngineView):
+            self.map_view.setHtml("")

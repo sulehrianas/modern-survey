@@ -1,4 +1,5 @@
 """UI for the Compass Traversing tab"""
+import io
 from PyQt6.QtWidgets import (
     QWidget,
     QHBoxLayout,
@@ -15,9 +16,27 @@ from PyQt6.QtWidgets import (
     QTableWidgetItem,
     QInputDialog,
     QScrollArea,
+    QTabWidget,
+    QLineEdit,
 )
 from PyQt6.QtCore import Qt
 import numpy as np
+
+FOLIUM_ERROR = None
+try:
+    import folium
+    FOLIUM_AVAILABLE = True
+except ImportError as e:
+    FOLIUM_AVAILABLE = False
+    FOLIUM_ERROR = str(e)
+
+WEB_ENGINE_ERROR = None
+try:
+    from PyQt6.QtWebEngineWidgets import QWebEngineView
+    WEB_ENGINE_AVAILABLE = True
+except ImportError as e:
+    WEB_ENGINE_AVAILABLE = False
+    WEB_ENGINE_ERROR = str(e)
 
 # Import data service functions
 from data_services.csv_handler import import_csv_to_dataframe, export_dataframe_to_csv
@@ -71,11 +90,31 @@ class CompassTab(QWidget):
 
         left_layout.addWidget(data_input_group)
 
-        # Results Plot Group
-        self.plot_group = QGroupBox("Traverse Plot")
+        # Results Visualization Group (Plot + Map)
+        self.plot_group = QGroupBox("Visualization")
         plot_layout = QVBoxLayout(self.plot_group)
+        
+        self.viz_tabs = QTabWidget()
+        
+        # Tab 1: Plot
         self.plot_widget = PlotWidget()
-        plot_layout.addWidget(self.plot_widget)
+        self.viz_tabs.addTab(self.plot_widget, "Traverse Plot")
+        
+        # Tab 2: Map
+        if not FOLIUM_AVAILABLE:
+            self.map_view = QLabel(f"Error importing 'folium':\n{FOLIUM_ERROR}\n\nTry running:\npython -m pip install folium")
+            self.map_view.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.map_view.setStyleSheet("color: red; font-weight: bold;")
+            self.map_view.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        elif WEB_ENGINE_AVAILABLE:
+            self.map_view = QWebEngineView()
+        else:
+            self.map_view = QLabel(f"Error importing 'PyQt6-WebEngine':\n{WEB_ENGINE_ERROR}\n\nTry running:\npython -m pip install PyQt6-WebEngine")
+            self.map_view.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.map_view.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.viz_tabs.addTab(self.map_view, "Google Map")
+        
+        plot_layout.addWidget(self.viz_tabs)
         left_layout.addWidget(self.plot_group)
         self.plot_group.setVisible(False) # Start with the plot hidden
 
@@ -102,6 +141,11 @@ class CompassTab(QWidget):
         self.adjustment_method_combo.model().item(1).setEnabled(False)
         controls_layout.addWidget(self.adjustment_method_combo)
         controls_layout.addSpacing(10)
+
+        # EPSG Input for Map
+        controls_layout.addWidget(QLabel("EPSG Code (for Map):"))
+        self.epsg_input = QLineEdit("32632")
+        controls_layout.addWidget(self.epsg_input)
 
         # Show Plot Checkbox
         self.show_plot_checkbox = QCheckBox("Show Traverse Plot")
@@ -319,6 +363,9 @@ class CompassTab(QWidget):
 
             # Update the plot
             self.plot_widget.plot_traverse(self.final_coords, title="Adjusted Traverse")
+            
+            # Update the map
+            self.update_map_view(self.final_coords)
 
             QMessageBox.information(self, "Calculation Complete", "Traverse has been calculated and adjusted successfully.")
         except Exception as e:
@@ -485,3 +532,42 @@ class CompassTab(QWidget):
         if file_path:
             self.plot_widget.figure.savefig(file_path, dpi=300, bbox_inches='tight')
             QMessageBox.information(self, "Success", f"Plot saved to {file_path}")
+
+    def update_map_view(self, coords):
+        """Updates the Google Map with the calculated coordinates."""
+        if not self.map_view or not FOLIUM_AVAILABLE or not WEB_ENGINE_AVAILABLE:
+            return
+            
+        try:
+            epsg = int(self.epsg_input.text())
+            # coords is list of (E, N). convert_to_global returns list of (lon, lat)
+            global_pts = convert_to_global(coords, epsg)
+            
+            if not global_pts: return
+            
+            # Calculate center
+            avg_lat = sum(p[1] for p in global_pts) / len(global_pts)
+            avg_lon = sum(p[0] for p in global_pts) / len(global_pts)
+            
+            m = folium.Map(location=[avg_lat, avg_lon], zoom_start=18)
+            
+            folium.TileLayer('https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}', attr='Google', name='Google Maps (Roads)').add_to(m)
+            folium.TileLayer('https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', attr='Google', name='Google Maps (Satellite)').add_to(m)
+            
+            # Draw Line (Folium needs Lat, Lon)
+            route = [(p[1], p[0]) for p in global_pts]
+            folium.PolyLine(route, color="blue", weight=3, opacity=0.8).add_to(m)
+            
+            # Markers
+            for i, pt in enumerate(global_pts):
+                folium.Marker([pt[1], pt[0]], popup=f"P{i}").add_to(m)
+                
+            folium.LayerControl().add_to(m)
+            
+            data = io.BytesIO()
+            m.save(data, close_file=False)
+            self.map_view.setHtml(data.getvalue().decode())
+            
+        except Exception as e:
+            # Fail silently or log to console so we don't interrupt the user flow
+            print(f"Map Update Error: {e}")

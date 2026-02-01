@@ -13,6 +13,7 @@ from .theodolite_tab import TheodoliteTab
 from .trig_leveling_tab import TrigLevelingTab
 from .triangulation_tab import TriangulationTab
 from .gps_tab import GpsTab
+from .map_tab import MapTab
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -34,6 +35,7 @@ class MainWindow(QMainWindow):
         self.tab_widget.addTab(TrigLevelingTab(), "Trigonometric Leveling")
         self.tab_widget.addTab(TriangulationTab(), "Triangulation")
         self.tab_widget.addTab(GpsTab(), "GPS / Conversion")
+        self.tab_widget.addTab(MapTab(), "Map Viewer")
 
         # Set the main layout for the central widget
         layout = QVBoxLayout(self.central_widget)

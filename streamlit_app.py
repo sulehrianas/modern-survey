@@ -1,353 +1,394 @@
 import streamlit as st
 import pandas as pd
-import sys
-import os
-import math
 import numpy as np
+import matplotlib.pyplot as plt
+import math
 
-# Ensure we can import from the core folder
-sys.path.append(os.path.abspath(os.path.dirname(__file__)))
+# Try to import folium for maps
+try:
+    import folium
+    from streamlit_folium import st_folium
+    FOLIUM_AVAILABLE = True
+except ImportError:
+    FOLIUM_AVAILABLE = False
 
-from core.trigonometric_leveling import calculate_trig_levels
-from core.triangulation import calculate_simple_triangulation
-from core.calculations import dms_to_dd, dd_to_dms, calculate_lat_dep, calculate_coordinates
-from core.adjustments import adjust_traverse_bowditch
-from core.coordinate_converter import convert_coords, get_utm_epsg_code
+# --- Import Core Logic ---
+try:
+    from core.calculations import dms_to_dd, dd_to_dms, calculate_lat_dep, calculate_coordinates
+    from core.adjustments import adjust_traverse_bowditch
+    from core.coordinate_converter import convert_to_global, convert_coords
+    from core.trigonometric_leveling import calculate_trig_levels
+    from core.triangulation import calculate_simple_triangulation
+except ImportError as e:
+    st.error(f"Could not import core modules: {e}")
+    st.info("Please ensure 'streamlit_app.py' is in the root directory of your project.")
+    st.stop()
 
-# --- Page Config ---
-st.set_page_config(page_title="Modern Survey Web", layout="wide")
-
-st.title("Modern Survey - Web Edition")
-st.markdown("Perform survey calculations directly in your browser.")
+st.set_page_config(page_title="Modern Survey", layout="wide", page_icon="📐")
+st.title("📐 Modern Survey System (Web)")
 
 # --- Tabs ---
-tab_compass, tab_theo, tab_level, tab_trig, tab_tri, tab_conv = st.tabs([
-    "Compass Traversing",
-    "Theodolite Traversing",
-    "Differential Leveling",
-    "Trigonometric Leveling", 
+tabs = st.tabs([
+    "Compass Traverse", 
+    "Theodolite Survey", 
+    "Diff. Leveling", 
+    "Trig. Leveling", 
     "Triangulation", 
-    "Coordinate Conversion"
+    "GPS / Conversion"
 ])
 
 # ==========================================
-# 1. COMPASS TRAVERSING TAB
+# TAB 1: COMPASS TRAVERSING
 # ==========================================
-with tab_compass:
+with tabs[0]:
     st.header("Compass Traversing")
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        st.subheader("Setup")
+        comp_start_n = st.number_input("Start Northing", value=1000.0, key="comp_n")
+        comp_start_e = st.number_input("Start Easting", value=5000.0, key="comp_e")
+        comp_fmt = st.selectbox("Angle Format", ["Azimuth (DD.MMSS)", "Azimuth (Decimal)"], key="comp_fmt")
+        comp_epsg = st.number_input("EPSG Code (Map)", value=32632, step=1, key="comp_epsg")
     
-    c_col1, c_col2 = st.columns(2)
-    with c_col1:
-        start_e = st.number_input("Start Easting", value=5000.0, format="%.3f")
-    with c_col2:
-        start_n = st.number_input("Start Northing", value=1000.0, format="%.3f")
+    with c2:
+        if "compass_data" not in st.session_state:
+            st.session_state.compass_data = pd.DataFrame(
+                [{"Line": "1-2", "Azimuth": "45.0000", "Distance": 100.0}],
+                columns=["Line", "Azimuth", "Distance"]
+            )
+        comp_df = st.data_editor(st.session_state.compass_data, num_rows="dynamic", use_container_width=True)
 
-    st.subheader("Traverse Data")
-    
-    # Initial Data
-    trav_data = {
-        "Station": ["A", "B", "C", "D"],
-        "Distance (m)": [100.0, 150.0, 120.0, 130.0],
-        "Azimuth (DD.MMSS)": ["45.0000", "135.0000", "225.0000", "315.0000"]
-    }
-    trav_df = st.data_editor(pd.DataFrame(trav_data), num_rows="dynamic", use_container_width=True, key="trav_editor")
-
-    if st.button("Calculate Traverse"):
+    if st.button("Calculate Compass Traverse"):
         try:
-            dists = trav_df["Distance (m)"].astype(float).tolist()
-            az_strs = trav_df["Azimuth (DD.MMSS)"].astype(str).tolist()
+            lines = comp_df["Line"].tolist()
+            raw_az = comp_df["Azimuth"].astype(str).tolist()
+            dists = comp_df["Distance"].astype(float).values
             
-            # 1. Calculate Lat/Dep
-            lats, deps = calculate_lat_dep(az_strs, dists, angle_format='dms')
-            
-            # 2. Adjust (Bowditch)
-            adj_lats, adj_deps, corr_lat, corr_dep = adjust_traverse_bowditch(dists, lats, deps)
-            
-            # 3. Calculate Coordinates
-            coords = calculate_coordinates(start_n, start_e, adj_lats, adj_deps)
-            
-            # Display Results
-            res_data = []
-            for i, (e, n) in enumerate(coords):
-                stn = trav_df.iloc[i]["Station"] if i < len(trav_df) else f"End"
-                # For the start point, we just show it. For subsequent points, they correspond to leg i-1
-                res_data.append({"Station": stn, "Easting": e, "Northing": n})
-            
-            # Handle the final point which is the result of the last leg
-            if len(coords) > len(trav_df):
-                 res_data[-1]["Station"] = "End/Close"
-
-            st.success("Traverse Calculated Successfully")
-            st.dataframe(pd.DataFrame(res_data), use_container_width=True)
-            
-            # Misclosure Info
-            mis_lat = sum(lats)
-            mis_dep = sum(deps)
-            mis_closure = math.sqrt(mis_lat**2 + mis_dep**2)
-            st.info(f"Linear Misclosure: {mis_closure:.4f} m")
-
+            if len(dists) > 0:
+                # Convert Angles
+                if "DD.MMSS" in comp_fmt:
+                    bearings = np.array([dms_to_dd(b) for b in raw_az])
+                else:
+                    bearings = np.array([float(b) for b in raw_az])
+                
+                # Calculate
+                lats, deps = calculate_lat_dep(bearings, dists)
+                adj_lat, adj_dep, _, _ = adjust_traverse_bowditch(dists, lats, deps)
+                coords = calculate_coordinates(comp_start_n, comp_start_e, adj_lat, adj_dep)
+                
+                # Results
+                res_data = []
+                for i in range(len(lines)):
+                    res_data.append({
+                        "Line": lines[i], "Lat": lats[i], "Dep": deps[i],
+                        "Adj N": coords[i+1][1], "Adj E": coords[i+1][0]
+                    })
+                st.dataframe(pd.DataFrame(res_data).style.format("{:.4f}"))
+                
+                # Plot
+                fig, ax = plt.subplots()
+                es, ns = zip(*coords)
+                ax.plot(es, ns, 'b-o')
+                for i, (e, n) in enumerate(coords):
+                    ax.text(e, n, f" P{i}")
+                ax.set_aspect('equal')
+                ax.grid(True)
+                st.pyplot(fig)
         except Exception as e:
             st.error(f"Error: {e}")
 
 # ==========================================
-# 2. THEODOLITE TRAVERSING TAB
+# TAB 2: THEODOLITE SURVEYING
 # ==========================================
-with tab_theo:
-    st.header("Theodolite Traversing")
-    st.markdown("Calculate coordinates using **Horizontal Angles** and Distances.")
+with tabs[1]:
+    st.header("Theodolite Surveying")
+    t1, t2 = st.columns([1, 2])
+    with t1:
+        theo_start_n = st.number_input("Start N", value=1000.0, key="theo_n")
+        theo_start_e = st.number_input("Start E", value=5000.0, key="theo_e")
+        theo_init_az = st.text_input("Initial Azimuth (DD.MMSS)", value="0.0000")
+        theo_k = st.number_input("Stadia Constant (k)", value=100.0)
+        theo_angle_type = st.selectbox("Angle Type", ["Interior (Right)", "Exterior"], key="theo_type")
 
-    t_col1, t_col2, t_col3 = st.columns(3)
-    with t_col1:
-        theo_start_e = st.number_input("Start Easting (m)", value=1000.0, format="%.3f", key="theo_e")
-    with t_col2:
-        theo_start_n = st.number_input("Start Northing (m)", value=1000.0, format="%.3f", key="theo_n")
-    with t_col3:
-        start_az_str = st.text_input("Reference Azimuth (DD.MMSS)", value="0.0000")
+    with t2:
+        if "theo_data" not in st.session_state:
+            st.session_state.theo_data = pd.DataFrame(
+                [{"Line": "1-2", "Angle": "90.0000", "Upper": 1.5, "Lower": 0.5, "V.Angle": "0.0"}],
+                columns=["Line", "Angle", "Upper", "Lower", "V.Angle"]
+            )
+        theo_df = st.data_editor(st.session_state.theo_data, num_rows="dynamic", use_container_width=True)
 
-    st.subheader("Field Observations")
-    
-    # Initial Data for Theodolite
-    theo_data = {
-        "Station": ["A", "B", "C", "D"],
-        "Distance (m)": [100.0, 120.0, 100.0, 120.0],
-        "Horiz. Angle (DD.MMSS)": ["90.0000", "90.0000", "90.0000", "90.0000"]
-    }
-    theo_df = st.data_editor(pd.DataFrame(theo_data), num_rows="dynamic", use_container_width=True, key="theo_editor")
-
-    if st.button("Calculate Theodolite Traverse"):
+    if st.button("Calculate Theodolite"):
         try:
-            # Inputs
-            dists = theo_df["Distance (m)"].astype(float).tolist()
-            angles_str = theo_df["Horiz. Angle (DD.MMSS)"].astype(str).tolist()
+            # Parse Data
+            rows = theo_df.to_dict('records')
+            if not rows: st.stop()
             
-            # Convert Start Azimuth to Decimal Degrees
-            current_az = dms_to_dd(float(start_az_str))
+            # Initial Azimuth
+            curr_az = dms_to_dd(theo_init_az)
             
-            calculated_azimuths = []
+            results = []
+            coords = [(theo_start_e, theo_start_n)]
             
-            # Calculate Azimuths from Angles
-            # Rule: New Azimuth = Previous Azimuth + Angle - 180 (if sum > 180) or + 180 (if sum < 180)
-            # This is a simplified "Angles to the Right" assumption.
-            for ang_str in angles_str:
-                angle_dd = dms_to_dd(float(ang_str))
-                az = current_az + angle_dd
+            for row in rows:
+                # 1. Distance from Stadia
+                u, l = float(row['Upper']), float(row['Lower'])
+                va_dms = str(row['V.Angle'])
+                va = dms_to_dd(va_dms)
+                dist = theo_k * (u - l) * (math.cos(math.radians(va))**2)
                 
-                # Normalize logic (Basic Traverse)
-                if az >= 180:
-                    az -= 180
+                # 2. Azimuth
+                angle_dms = str(row['Angle'])
+                angle = dms_to_dd(angle_dms)
+                
+                back_az = (curr_az + 180) % 360
+                if "Interior" in theo_angle_type:
+                    next_az = (back_az + angle) % 360
                 else:
-                    az += 180
+                    next_az = (back_az - angle) % 360
                 
-                # Normalize to 0-360
-                az = az % 360
+                curr_az = next_az
                 
-                calculated_azimuths.append(dd_to_dms(az)) # Store as DMS string for consistency with core functions
-                current_az = az # Set for next leg
-
-            # 1. Calculate Lat/Dep using the calculated azimuths
-            lats, deps = calculate_lat_dep(calculated_azimuths, dists, angle_format='dms')
+                # 3. Coords
+                lat = dist * math.cos(math.radians(curr_az))
+                dep = dist * math.sin(math.radians(curr_az))
+                
+                prev_e, prev_n = coords[-1]
+                new_e = prev_e + dep
+                new_n = prev_n + lat
+                coords.append((new_e, new_n))
+                
+                results.append({
+                    "Line": row['Line'], "Dist": dist, "Azimuth": dd_to_dms(curr_az),
+                    "Lat": lat, "Dep": dep, "N": new_n, "E": new_e
+                })
             
-            # 2. Adjust (Bowditch)
-            adj_lats, adj_deps, corr_lat, corr_dep = adjust_traverse_bowditch(dists, lats, deps)
+            st.dataframe(pd.DataFrame(results).style.format({"Dist": "{:.3f}", "Lat": "{:.3f}", "Dep": "{:.3f}", "N": "{:.3f}", "E": "{:.3f}"}))
             
-            # 3. Calculate Coordinates
-            coords = calculate_coordinates(theo_start_n, theo_start_e, adj_lats, adj_deps)
-            
-            # Display Results
-            res_data = []
+            # Plot
+            fig, ax = plt.subplots()
+            es, ns = zip(*coords)
+            ax.plot(es, ns, 'r-^')
             for i, (e, n) in enumerate(coords):
-                stn = theo_df.iloc[i]["Station"] if i < len(theo_df) else "End"
-                res_data.append({"Station": stn, "Easting": e, "Northing": n, "Calc Azimuth": calculated_azimuths[i] if i < len(calculated_azimuths) else "-"})
+                ax.text(e, n, f" ST{i}")
+            ax.set_aspect('equal')
+            ax.grid(True)
+            st.pyplot(fig)
             
-            st.success("Theodolite Traverse Calculated")
-            st.dataframe(pd.DataFrame(res_data), use_container_width=True)
-
         except Exception as e:
             st.error(f"Calculation Error: {e}")
 
 # ==========================================
-# 3. DIFFERENTIAL LEVELING TAB
+# TAB 3: DIFFERENTIAL LEVELING
 # ==========================================
-with tab_level:
+with tabs[2]:
     st.header("Differential Leveling")
+    start_bm = st.number_input("Start BM Elevation", value=100.0)
     
-    start_bm = st.number_input("Starting Benchmark Elevation (m)", value=100.0, format="%.4f")
+    if "level_data" not in st.session_state:
+        st.session_state.level_data = pd.DataFrame(
+            [{"Station": "BM1", "BS": 1.5, "FS": 0.0}, {"Station": "TP1", "BS": 0.0, "FS": 1.2}],
+            columns=["Station", "BS", "FS"]
+        )
+    lev_df = st.data_editor(st.session_state.level_data, num_rows="dynamic", use_container_width=True)
     
-    level_data = {
-        "Station": ["BM1", "TP1", "TP2", "BM2"],
-        "Backsight (BS)": [1.500, 1.200, 1.100, 0.0],
-        "Foresight (FS)": [0.0, 1.400, 1.300, 1.600]
-    }
-    level_df = st.data_editor(pd.DataFrame(level_data), num_rows="dynamic", use_container_width=True, key="level_editor")
-
     if st.button("Calculate Levels"):
-        results = []
-        current_elev = start_bm
-        current_hi = 0.0
-        
-        # Logic adapted from ui/leveling_tab.py
-        # We iterate through the dataframe rows
-        for idx, row in level_df.iterrows():
-            bs = float(row["Backsight (BS)"])
-            fs = float(row["Foresight (FS)"])
-            stn = str(row["Station"])
-            
-            # If it's the first row or a row with BS, we calculate HI based on current elevation
-            # Note: In standard leveling table, HI is on the line of the BS.
-            # Elevation is established by Previous HI - Current FS.
-            
-            # 1. Establish Elevation of this point
-            if idx == 0:
-                this_elev = start_bm
-            else:
-                # Elevation = Previous HI - This FS
-                # We need the HI from the *previous* row logic
-                this_elev = current_hi - fs
-            
-            # 2. Establish HI for this setup (if there is a BS)
-            if bs != 0:
-                current_hi = this_elev + bs
-                hi_display = f"{current_hi:.4f}"
-            else:
-                hi_display = "-" # End of run usually
-            
-            results.append({
-                "Station": stn,
-                "Backsight": bs,
-                "Foresight": fs,
-                "HI": hi_display,
-                "Elevation": this_elev
-            })
-            
-            # Update current_elev for next iteration logic if needed, 
-            # though we used current_hi which persists.
-            current_elev = this_elev
-
-        st.dataframe(pd.DataFrame(results).style.format({"Elevation": "{:.4f}", "Backsight": "{:.3f}", "Foresight": "{:.3f}"}), use_container_width=True)
-
-# ==========================================
-# 3. TRIGONOMETRIC LEVELING TAB
-# ==========================================
-with tab_trig:
-    st.header("Trigonometric Leveling")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        stn_elev = st.number_input("Station Elevation (m)", value=100.0, step=0.001, format="%.3f")
-    with col2:
-        hi = st.number_input("Instrument Height (HI) (m)", value=1.500, step=0.001, format="%.3f")
-
-    st.subheader("Observations")
-    st.info("Enter your observations below. VA should be in DD.MMSS format (Zenith).")
-
-    # Create a template DataFrame for the editor
-    data = {
-        "target": ["T1", "T2", "T3"],
-        "hd": [10.5, 20.0, 15.0],
-        "va": ["90.0000", "85.3000", "92.1500"],
-        "th": [1.5, 1.5, 1.5]
-    }
-    df = pd.DataFrame(data)
-
-    # Editable Data Table
-    edited_df = st.data_editor(df, num_rows="dynamic", use_container_width=True)
-
-    if st.button("Calculate Elevations", type="primary"):
-        # Prepare data for the core function
-        obs_list = []
-        for index, row in edited_df.iterrows():
-            obs_list.append({
-                'target': str(row['target']),
-                'hd': float(row['hd']),
-                'va': str(row['va']),
-                'th': float(row['th']),
-                'type': 'Zenith' # Defaulting to Zenith for web simplicity
-            })
-        
-        # Call your existing core logic
         try:
-            results = calculate_trig_levels(stn_elev, hi, obs_list)
-            
-            # Display Results
-            res_df = pd.DataFrame(results)
-            # Select and rename columns for display
-            display_df = res_df[['target', 'elevation', 'cr']].rename(columns={'elevation': 'Final Elevation', 'cr': 'C&R Correction'})
-            st.success("Calculation Complete!")
-            st.dataframe(display_df, use_container_width=True)
-            
+            rows = lev_df.to_dict('records')
+            if rows:
+                rows[0]['Elevation'] = start_bm
+                rows[0]['HI'] = 0.0
+                
+                curr_hi = 0.0
+                total_bs, total_fs = 0.0, 0.0
+                
+                for i, row in enumerate(rows):
+                    bs = float(row.get('BS', 0) or 0)
+                    fs = float(row.get('FS', 0) or 0)
+                    
+                    if 'Elevation' in row:
+                        if bs > 0:
+                            curr_hi = row['Elevation'] + bs
+                            row['HI'] = curr_hi
+                            total_bs += bs
+                    
+                    if fs > 0 and i + 1 < len(rows):
+                        if row.get('HI', 0) == 0 and i > 0:
+                            curr_hi = rows[i-1]['HI']
+                            row['HI'] = curr_hi
+                        
+                        next_elev = curr_hi - fs
+                        rows[i+1]['Elevation'] = next_elev
+                        total_fs += fs
+                
+                res_df = pd.DataFrame(rows)
+                st.dataframe(res_df[["Station", "BS", "HI", "FS", "Elevation"]].style.format("{:.4f}"))
+                
+                check = start_bm + total_bs - total_fs
+                end_elev = rows[-1].get('Elevation', 0)
+                st.success(f"Check: {check:.4f} | End Elev: {end_elev:.4f} | Misclosure: {check - end_elev:.4f}")
         except Exception as e:
-            st.error(f"An error occurred: {e}")
+            st.error(f"Error: {e}")
 
 # ==========================================
-# 4. TRIANGULATION TAB
+# TAB 4: TRIGONOMETRIC LEVELING
 # ==========================================
-with tab_tri:
-    st.header("Triangulation (Simple Chain)")
+with tabs[3]:
+    st.header("Trigonometric Leveling")
+    c1, c2 = st.columns(2)
+    with c1:
+        trig_stn_elev = st.number_input("Station Elev", value=100.0)
+        trig_hi = st.number_input("Instrument Height (HI)", value=1.5)
     
-    t_col1, t_col2, t_col3, t_col4 = st.columns(4)
-    with t_col1: tri_start_e = st.number_input("Start E", value=1000.0)
-    with t_col2: tri_start_n = st.number_input("Start N", value=1000.0)
-    with t_col3: tri_base_dist = st.number_input("Base Dist", value=100.0)
-    with t_col4: tri_base_az = st.text_input("Base Az (DMS)", value="90.0000")
-
-    tri_data = {
-        "P1": ["A"], "P2": ["B"], "P3": ["C"],
-        "Angle 1 (DMS)": ["60.0000"], "Angle 2 (DMS)": ["60.0000"], "Angle 3 (DMS)": ["60.0000"],
-        "Direction": ["Left"]
-    }
-    tri_df = st.data_editor(pd.DataFrame(tri_data), num_rows="dynamic", use_container_width=True, key="tri_editor")
-
-    if st.button("Calculate Triangulation"):
-        triangles = []
-        for _, row in tri_df.iterrows():
-            triangles.append({
-                'p1': str(row['P1']), 'p2': str(row['P2']), 'p3': str(row['P3']),
-                'a1': str(row['Angle 1 (DMS)']), 'a2': str(row['Angle 2 (DMS)']), 'a3': str(row['Angle 3 (DMS)']),
-                'dir': str(row['Direction'])
-            })
-        
+    if "trig_data" not in st.session_state:
+        st.session_state.trig_data = pd.DataFrame(
+            [{"Target": "T1", "HD": 50.0, "VA (DD.MMSS)": "0.0000", "TH": 1.5}],
+            columns=["Target", "HD", "VA (DD.MMSS)", "TH"]
+        )
+    trig_df = st.data_editor(st.session_state.trig_data, num_rows="dynamic", use_container_width=True)
+    
+    if st.button("Calculate Trig Levels"):
         try:
+            obs_list = []
+            for _, row in trig_df.iterrows():
+                obs_list.append({
+                    'target': row['Target'],
+                    'hd': row['HD'],
+                    'va': row['VA (DD.MMSS)'],
+                    'th': row['TH']
+                })
+            
+            results = calculate_trig_levels(trig_stn_elev, trig_hi, obs_list)
+            
+            res_data = [{"Target": r['target'], "Elevation": r['elevation'], "Correction": r['cr']} for r in results]
+            st.dataframe(pd.DataFrame(res_data).style.format("{:.4f}"))
+        except Exception as e:
+            st.error(f"Error: {e}")
+
+# ==========================================
+# TAB 5: TRIANGULATION
+# ==========================================
+with tabs[4]:
+    st.header("Simple Triangulation")
+    c1, c2 = st.columns(2)
+    with c1:
+        tri_start_e = st.number_input("Start E", value=1000.0, key="tri_e")
+        tri_start_n = st.number_input("Start N", value=1000.0, key="tri_n")
+    with c2:
+        tri_base_dist = st.number_input("Base Dist", value=100.0)
+        tri_base_az = st.text_input("Base Azimuth (DD.MMSS)", value="90.0000")
+    
+    if "tri_data" not in st.session_state:
+        st.session_state.tri_data = pd.DataFrame(
+            [{"P1": "A", "P2": "B", "P3": "C", "A1": "60.0000", "A2": "60.0000", "A3": "60.0000", "Dir": "Left"}],
+            columns=["P1", "P2", "P3", "A1", "A2", "A3", "Dir"]
+        )
+    
+    tri_df = st.data_editor(
+        st.session_state.tri_data, 
+        num_rows="dynamic", 
+        use_container_width=True,
+        column_config={
+            "Dir": st.column_config.SelectboxColumn("Dir", options=["Left", "Right"])
+        }
+    )
+    
+    if st.button("Calculate Network"):
+        try:
+            triangles = []
+            for _, row in tri_df.iterrows():
+                triangles.append({
+                    'p1': row['P1'], 'p2': row['P2'], 'p3': row['P3'],
+                    'a1': str(row['A1']), 'a2': str(row['A2']), 'a3': str(row['A3']),
+                    'dir': row['Dir']
+                })
+            
             stations, results = calculate_simple_triangulation(tri_start_e, tri_start_n, tri_base_dist, tri_base_az, triangles)
             
             st.subheader("Station Coordinates")
-            stn_data = [{"Station": k, "Easting": v[0], "Northing": v[1]} for k, v in stations.items()]
-            st.dataframe(pd.DataFrame(stn_data), use_container_width=True)
+            st_data = [{"Station": k, "Easting": v[0], "Northing": v[1]} for k, v in stations.items()]
+            st.dataframe(pd.DataFrame(st_data).style.format("{:.3f}"))
             
-            st.subheader("Triangle Details")
-            st.dataframe(pd.DataFrame(results), use_container_width=True)
+            st.subheader("Triangle Closures")
+            res_data = [{"Triangle": r['triangle'], "Error (sec)": r['error'], "Base": r['dist_base']} for r in results]
+            st.dataframe(pd.DataFrame(res_data))
+            
+            # Plot
+            fig, ax = plt.subplots()
+            for k, v in stations.items():
+                ax.plot(v[0], v[1], 'ro')
+                ax.text(v[0], v[1], f" {k}")
+            
+            # Draw lines (simplified)
+            pts = list(stations.values())
+            if len(pts) > 1:
+                # Draw base
+                ax.plot([pts[0][0], pts[1][0]], [pts[0][1], pts[1][1]], 'k-')
+                # Draw others roughly
+                for tri in triangles:
+                    if tri['p1'] in stations and tri['p3'] in stations:
+                        p1, p3 = stations[tri['p1']], stations[tri['p3']]
+                        ax.plot([p1[0], p3[0]], [p1[1], p3[1]], 'b--')
+                    if tri['p2'] in stations and tri['p3'] in stations:
+                        p2, p3 = stations[tri['p2']], stations[tri['p3']]
+                        ax.plot([p2[0], p3[0]], [p2[1], p3[1]], 'b--')
+
+            ax.set_aspect('equal')
+            ax.grid(True)
+            st.pyplot(fig)
             
         except Exception as e:
             st.error(f"Error: {e}")
 
 # ==========================================
-# 5. COORDINATE CONVERSION TAB
+# TAB 6: GPS / CONVERSION
 # ==========================================
-with tab_conv:
+with tabs[5]:
     st.header("Coordinate Conversion")
+    c1, c2 = st.columns(2)
+    with c1:
+        from_epsg = st.number_input("From EPSG", value=4326, step=1)
+    with c2:
+        to_epsg = st.number_input("To EPSG", value=32632, step=1)
+        
+    if "gps_data" not in st.session_state:
+        st.session_state.gps_data = pd.DataFrame(
+            [{"Name": "P1", "X/Lon": 12.4924, "Y/Lat": 41.8902, "Z": 50.0}],
+            columns=["Name", "X/Lon", "Y/Lat", "Z"]
+        )
+        
+    gps_df = st.data_editor(st.session_state.gps_data, num_rows="dynamic")
     
-    cc_col1, cc_col2 = st.columns(2)
-    with cc_col1:
-        from_epsg = st.number_input("Source EPSG (e.g., 4326 for WGS84)", value=4326, step=1)
-    with cc_col2:
-        to_epsg = st.number_input("Target EPSG (e.g., 32632 for UTM)", value=32632, step=1)
-        
-    st.info("Tip: Use EPSG 4326 for Lat/Lon and 326xx for UTM North (where xx is zone).")
-
-    conv_data = {
-        "X / Lon": [12.4924],
-        "Y / Lat": [41.8902],
-        "Z / Elev": [0.0]
-    }
-    conv_df = st.data_editor(pd.DataFrame(conv_data), num_rows="dynamic", use_container_width=True, key="conv_editor")
-
-    if st.button("Convert Coordinates"):
-        points = []
-        for _, row in conv_df.iterrows():
-            points.append((float(row["X / Lon"]), float(row["Y / Lat"]), float(row["Z / Elev"])))
-        
+    if st.button("Convert Coords"):
         try:
-            converted = convert_coords(points, int(from_epsg), int(to_epsg))
-            res_conv = [{"X_out": c[0], "Y_out": c[1], "Z_out": c[2]} for c in converted]
-            st.dataframe(pd.DataFrame(res_conv), use_container_width=True)
+            points = []
+            for _, row in gps_df.iterrows():
+                points.append((float(row["X/Lon"]), float(row["Y/Lat"]), float(row["Z"])))
+            
+            converted = convert_coords(points, from_epsg, to_epsg)
+            
+            res_df = gps_df.copy()
+            res_df["Out X"] = [c[0] for c in converted]
+            res_df["Out Y"] = [c[1] for c in converted]
+            res_df["Out Z"] = [c[2] for c in converted]
+            
+            st.dataframe(res_df)
+            
+            # Map Preview (if converting to WGS84 or if input is WGS84)
+            map_points = []
+            if from_epsg == 4326:
+                map_points = [(p[1], p[0]) for p in points] # Lat, Lon
+            elif to_epsg == 4326:
+                map_points = [(c[1], c[0]) for c in converted]
+            
+            if map_points and FOLIUM_AVAILABLE:
+                st.subheader("Map Preview")
+                avg_lat = sum(p[0] for p in map_points)/len(map_points)
+                avg_lon = sum(p[1] for p in map_points)/len(map_points)
+                m = folium.Map(location=[avg_lat, avg_lon], zoom_start=15)
+                for i, mp in enumerate(map_points):
+                    folium.Marker(mp, popup=f"P{i}").add_to(m)
+                st_folium(m, height=400, use_container_width=True)
+                
         except Exception as e:
             st.error(f"Conversion Error: {e}")

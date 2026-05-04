@@ -3,6 +3,10 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import math
+import sys
+import os
+
+st.set_page_config(page_title="Modern Survey", layout="wide", page_icon="📐")
 
 # Try to import folium for maps
 try:
@@ -13,10 +17,12 @@ except ImportError:
     FOLIUM_AVAILABLE = False
 
 # --- Import Core Logic ---
+# Ensure the root directory is in sys.path
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
 try:
     from core.calculations import dms_to_dd, dd_to_dms, calculate_lat_dep, calculate_coordinates
     from core.adjustments import adjust_traverse_bowditch
-    from core.coordinate_converter import convert_to_global, convert_coords
     from core.trigonometric_leveling import calculate_trig_levels
     from core.triangulation import calculate_simple_triangulation
 except ImportError as e:
@@ -24,8 +30,31 @@ except ImportError as e:
     st.info("Please ensure 'streamlit_app.py' is in the root directory of your project.")
     st.stop()
 
-st.set_page_config(page_title="Modern Survey", layout="wide", page_icon="📐")
+try:
+    from core.coordinate_converter import convert_to_global, convert_coords
+    PYPROJ_AVAILABLE = True
+except ImportError:
+    PYPROJ_AVAILABLE = False
+
 st.title("📐 Modern Survey System (Web)")
+
+# --- Helper Functions ---
+def generate_kml_string(points, names):
+    """Generates a simple KML string for coordinates."""
+    kml = ['<?xml version="1.0" encoding="UTF-8"?>', '<kml xmlns="http://www.opengis.net/kml/2.2">', '<Document>']
+    for name, (lon, lat) in zip(names, points):
+        kml.append(f'<Placemark><name>{name}</name><Point><coordinates>{lon},{lat},0</coordinates></Point></Placemark>')
+    kml.append('</Document></kml>')
+    return "".join(kml)
+
+def generate_text_report(title, summary_data, df):
+    """Generates a simple text report."""
+    report = f"{title}\n{'='*len(title)}\n\nConfiguration & Summary:\n"
+    for k, v in summary_data.items():
+        report += f"- {k}: {v}\n"
+    report += "\nDetailed Results:\n"
+    report += df.to_string(index=False)
+    return report
 
 # --- Tabs ---
 tabs = st.tabs([
@@ -56,10 +85,21 @@ with tabs[0]:
                 [{"Line": "1-2", "Azimuth": "45.0000", "Distance": 100.0}],
                 columns=["Line", "Azimuth", "Distance"]
             )
-        comp_df = st.data_editor(st.session_state.compass_data, num_rows="dynamic", use_container_width=True)
+        
+        # Import CSV
+        uploaded_file = st.file_uploader("Import CSV", type=["csv"], key="comp_csv")
+        if uploaded_file is not None:
+            try:
+                st.session_state.compass_data = pd.read_csv(uploaded_file)
+                st.success("CSV Loaded!")
+            except Exception as e:
+                st.error(f"Error loading CSV: {e}")
+
+        comp_df = st.data_editor(st.session_state.compass_data, num_rows="dynamic", width='stretch')
 
     if st.button("Calculate Compass Traverse"):
         try:
+            # Calculation Logic
             lines = comp_df["Line"].tolist()
             raw_az = comp_df["Azimuth"].astype(str).tolist()
             dists = comp_df["Distance"].astype(float).values
@@ -83,19 +123,87 @@ with tabs[0]:
                         "Line": lines[i], "Lat": lats[i], "Dep": deps[i],
                         "Adj N": coords[i+1][1], "Adj E": coords[i+1][0]
                     })
-                st.dataframe(pd.DataFrame(res_data).style.format("{:.4f}"))
                 
-                # Plot
-                fig, ax = plt.subplots()
-                es, ns = zip(*coords)
-                ax.plot(es, ns, 'b-o')
-                for i, (e, n) in enumerate(coords):
-                    ax.text(e, n, f" P{i}")
-                ax.set_aspect('equal')
-                ax.grid(True)
-                st.pyplot(fig)
+                # Store in Session State
+                st.session_state.comp_res = {
+                    "df": pd.DataFrame(res_data),
+                    "coords": coords,
+                    "lines": lines,
+                    "dists": dists,
+                    "epsg": comp_epsg,
+                    "start_n": comp_start_n,
+                    "start_e": comp_start_e
+                }
         except Exception as e:
             st.error(f"Error: {e}")
+
+    # Display Results if available
+    if "comp_res" in st.session_state:
+        res = st.session_state.comp_res
+        st.dataframe(res["df"].style.format({
+            "Lat": "{:.4f}", "Dep": "{:.4f}", 
+            "Adj N": "{:.4f}", "Adj E": "{:.4f}"
+        }))
+        
+        # Plot
+        fig, ax = plt.subplots()
+        es, ns = zip(*res["coords"])
+        ax.plot(es, ns, 'b-o')
+        for i, (e, n) in enumerate(res["coords"]):
+            ax.text(e, n, f" P{i}")
+        ax.set_aspect('equal')
+        ax.grid(True)
+        st.pyplot(fig)
+
+        # Map & Exports
+        st.markdown("---")
+        st.subheader("Map & Exports")
+        
+        if FOLIUM_AVAILABLE and PYPROJ_AVAILABLE:
+            try:
+                # Convert to Global
+                global_pts = convert_to_global(res["coords"], res["epsg"])
+                point_names = ["Start"] + res["lines"]
+                
+                # Map
+                avg_lat = sum(p[1] for p in global_pts) / len(global_pts)
+                avg_lon = sum(p[0] for p in global_pts) / len(global_pts)
+                m = folium.Map(location=[avg_lat, avg_lon], zoom_start=17)
+                folium.TileLayer('openstreetmap').add_to(m)
+                folium.TileLayer(
+                    tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}',
+                    attr='Google',
+                    name='Google Hybrid',
+                    overlay=False,
+                    control=True
+                ).add_to(m)
+                
+                folium.PolyLine([(p[1], p[0]) for p in global_pts], color="blue", weight=3).add_to(m)
+                for pt, name in zip(global_pts, point_names):
+                    folium.Marker([pt[1], pt[0]], popup=name).add_to(m)
+                
+                folium.LayerControl().add_to(m)
+                st_folium(m, height=400, width='stretch')
+                
+                # Export Buttons
+                ec1, ec2, ec3 = st.columns(3)
+                with ec1:
+                    st.download_button("Download CSV", res["df"].to_csv(index=False).encode('utf-8'), "compass_results.csv", "text/csv")
+                with ec2:
+                    kml_str = generate_kml_string(global_pts, point_names)
+                    st.download_button("Download KML", kml_str, "compass_traverse.kml", "application/vnd.google-earth.kml+xml")
+                with ec3:
+                    summary = {
+                        "Start N": res["start_n"], "Start E": res["start_e"],
+                        "EPSG": res["epsg"], "Total Distance": f"{np.sum(res['dists']):.2f} m"
+                    }
+                    report_txt = generate_text_report("Compass Traverse Report", summary, res["df"])
+                    st.download_button("Download Report (Txt)", report_txt, "compass_report.txt", "text/plain")
+                    
+            except Exception as e:
+                st.warning(f"Map/Export Error: {e}")
+        elif not PYPROJ_AVAILABLE:
+            st.warning("Maps and KML export require the 'pyproj' library.")
 
 # ==========================================
 # TAB 2: THEODOLITE SURVEYING
@@ -109,6 +217,7 @@ with tabs[1]:
         theo_init_az = st.text_input("Initial Azimuth (DD.MMSS)", value="0.0000")
         theo_k = st.number_input("Stadia Constant (k)", value=100.0)
         theo_angle_type = st.selectbox("Angle Type", ["Interior (Right)", "Exterior"], key="theo_type")
+        theo_epsg = st.number_input("EPSG Code (Map)", value=32632, step=1, key="theo_epsg")
 
     with t2:
         if "theo_data" not in st.session_state:
@@ -116,7 +225,17 @@ with tabs[1]:
                 [{"Line": "1-2", "Angle": "90.0000", "Upper": 1.5, "Lower": 0.5, "V.Angle": "0.0"}],
                 columns=["Line", "Angle", "Upper", "Lower", "V.Angle"]
             )
-        theo_df = st.data_editor(st.session_state.theo_data, num_rows="dynamic", use_container_width=True)
+        
+        # Import CSV
+        uploaded_file = st.file_uploader("Import CSV", type=["csv"], key="theo_csv")
+        if uploaded_file is not None:
+            try:
+                st.session_state.theo_data = pd.read_csv(uploaded_file)
+                st.success("CSV Loaded!")
+            except Exception as e:
+                st.error(f"Error loading CSV: {e}")
+
+        theo_df = st.data_editor(st.session_state.theo_data, num_rows="dynamic", width='stretch')
 
     if st.button("Calculate Theodolite"):
         try:
@@ -163,20 +282,83 @@ with tabs[1]:
                     "Lat": lat, "Dep": dep, "N": new_n, "E": new_e
                 })
             
-            st.dataframe(pd.DataFrame(results).style.format({"Dist": "{:.3f}", "Lat": "{:.3f}", "Dep": "{:.3f}", "N": "{:.3f}", "E": "{:.3f}"}))
-            
-            # Plot
-            fig, ax = plt.subplots()
-            es, ns = zip(*coords)
-            ax.plot(es, ns, 'r-^')
-            for i, (e, n) in enumerate(coords):
-                ax.text(e, n, f" ST{i}")
-            ax.set_aspect('equal')
-            ax.grid(True)
-            st.pyplot(fig)
+            st.session_state.theo_res = {
+                "df": pd.DataFrame(results),
+                "coords": coords,
+                "results": results,
+                "start_n": theo_start_n,
+                "start_e": theo_start_e,
+                "init_az": theo_init_az,
+                "angle_type": theo_angle_type,
+                "epsg": theo_epsg
+            }
             
         except Exception as e:
             st.error(f"Calculation Error: {e}")
+
+    if "theo_res" in st.session_state:
+        res = st.session_state.theo_res
+        st.dataframe(res["df"].style.format({"Dist": "{:.3f}", "Lat": "{:.3f}", "Dep": "{:.3f}", "N": "{:.3f}", "E": "{:.3f}"}))
+        
+        # Plot
+        fig, ax = plt.subplots()
+        es, ns = zip(*res["coords"])
+        ax.plot(es, ns, 'r-^')
+        for i, (e, n) in enumerate(res["coords"]):
+            ax.text(e, n, f" ST{i}")
+        ax.set_aspect('equal')
+        ax.grid(True)
+        st.pyplot(fig)
+
+        # Map & Exports
+        st.markdown("---")
+        st.subheader("Map & Exports")
+        
+        if FOLIUM_AVAILABLE and PYPROJ_AVAILABLE:
+            try:
+                # Convert to Global
+                global_pts = convert_to_global(res["coords"], res["epsg"])
+                point_names = ["Start"] + [r['Line'] for r in res["results"]]
+                
+                # Map
+                avg_lat = sum(p[1] for p in global_pts) / len(global_pts)
+                avg_lon = sum(p[0] for p in global_pts) / len(global_pts)
+                m = folium.Map(location=[avg_lat, avg_lon], zoom_start=17)
+                folium.TileLayer('openstreetmap').add_to(m)
+                folium.TileLayer(
+                    tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}',
+                    attr='Google',
+                    name='Google Hybrid',
+                    overlay=False,
+                    control=True
+                ).add_to(m)
+                
+                folium.PolyLine([(p[1], p[0]) for p in global_pts], color="red", weight=3).add_to(m)
+                for pt, name in zip(global_pts, point_names):
+                    folium.Marker([pt[1], pt[0]], popup=name).add_to(m)
+                
+                folium.LayerControl().add_to(m)
+                st_folium(m, height=400, width='stretch')
+                
+                # Export Buttons
+                ec1, ec2, ec3 = st.columns(3)
+                with ec1:
+                    st.download_button("Download CSV", res["df"].to_csv(index=False).encode('utf-8'), "theodolite_results.csv", "text/csv")
+                with ec2:
+                    kml_str = generate_kml_string(global_pts, point_names)
+                    st.download_button("Download KML", kml_str, "theodolite_survey.kml", "application/vnd.google-earth.kml+xml")
+                with ec3:
+                    summary = {
+                        "Start N": res["start_n"], "Start E": res["start_e"],
+                        "Initial Azimuth": res["init_az"], "Angle Type": res["angle_type"]
+                    }
+                    report_txt = generate_text_report("Theodolite Survey Report", summary, res["df"])
+                    st.download_button("Download Report (Txt)", report_txt, "theodolite_report.txt", "text/plain")
+                    
+            except Exception as e:
+                st.warning(f"Map/Export Error: {e}")
+        elif not PYPROJ_AVAILABLE:
+            st.warning("Maps and KML export require the 'pyproj' library.")
 
 # ==========================================
 # TAB 3: DIFFERENTIAL LEVELING
@@ -190,7 +372,7 @@ with tabs[2]:
             [{"Station": "BM1", "BS": 1.5, "FS": 0.0}, {"Station": "TP1", "BS": 0.0, "FS": 1.2}],
             columns=["Station", "BS", "FS"]
         )
-    lev_df = st.data_editor(st.session_state.level_data, num_rows="dynamic", use_container_width=True)
+    lev_df = st.data_editor(st.session_state.level_data, num_rows="dynamic", width='stretch')
     
     if st.button("Calculate Levels"):
         try:
@@ -221,14 +403,24 @@ with tabs[2]:
                         rows[i+1]['Elevation'] = next_elev
                         total_fs += fs
                 
-                res_df = pd.DataFrame(rows)
-                st.dataframe(res_df[["Station", "BS", "HI", "FS", "Elevation"]].style.format("{:.4f}"))
-                
                 check = start_bm + total_bs - total_fs
                 end_elev = rows[-1].get('Elevation', 0)
-                st.success(f"Check: {check:.4f} | End Elev: {end_elev:.4f} | Misclosure: {check - end_elev:.4f}")
+                
+                st.session_state.lev_res = {
+                    "df": pd.DataFrame(rows),
+                    "check": check,
+                    "end_elev": end_elev,
+                    "misclosure": check - end_elev
+                }
         except Exception as e:
             st.error(f"Error: {e}")
+
+    if "lev_res" in st.session_state:
+        res = st.session_state.lev_res
+        st.dataframe(res["df"][["Station", "BS", "HI", "FS", "Elevation"]].style.format({
+            "BS": "{:.4f}", "HI": "{:.4f}", "FS": "{:.4f}", "Elevation": "{:.4f}"
+        }))
+        st.success(f"Check: {res['check']:.4f} | End Elev: {res['end_elev']:.4f} | Misclosure: {res['misclosure']:.4f}")
 
 # ==========================================
 # TAB 4: TRIGONOMETRIC LEVELING
@@ -245,7 +437,7 @@ with tabs[3]:
             [{"Target": "T1", "HD": 50.0, "VA (DD.MMSS)": "0.0000", "TH": 1.5}],
             columns=["Target", "HD", "VA (DD.MMSS)", "TH"]
         )
-    trig_df = st.data_editor(st.session_state.trig_data, num_rows="dynamic", use_container_width=True)
+    trig_df = st.data_editor(st.session_state.trig_data, num_rows="dynamic", width='stretch')
     
     if st.button("Calculate Trig Levels"):
         try:
@@ -260,10 +452,16 @@ with tabs[3]:
             
             results = calculate_trig_levels(trig_stn_elev, trig_hi, obs_list)
             
-            res_data = [{"Target": r['target'], "Elevation": r['elevation'], "Correction": r['cr']} for r in results]
-            st.dataframe(pd.DataFrame(res_data).style.format("{:.4f}"))
+            st.session_state.trig_res = [{"Target": r['target'], "Elevation": r['elevation'], "Correction": r['cr']} for r in results]
+            
         except Exception as e:
             st.error(f"Error: {e}")
+
+    if "trig_res" in st.session_state:
+        res_df = pd.DataFrame(st.session_state.trig_res)
+        st.dataframe(res_df.style.format({
+            "Elevation": "{:.4f}", "Correction": "{:.4f}"
+        }))
 
 # ==========================================
 # TAB 5: TRIANGULATION
@@ -277,6 +475,7 @@ with tabs[4]:
     with c2:
         tri_base_dist = st.number_input("Base Dist", value=100.0)
         tri_base_az = st.text_input("Base Azimuth (DD.MMSS)", value="90.0000")
+        tri_epsg = st.number_input("EPSG Code", value=32632, step=1)
     
     if "tri_data" not in st.session_state:
         st.session_state.tri_data = pd.DataFrame(
@@ -284,10 +483,19 @@ with tabs[4]:
             columns=["P1", "P2", "P3", "A1", "A2", "A3", "Dir"]
         )
     
+    # Import CSV
+    uploaded_file = st.file_uploader("Import CSV", type=["csv"], key="tri_csv")
+    if uploaded_file is not None:
+        try:
+            st.session_state.tri_data = pd.read_csv(uploaded_file)
+            st.success("CSV Loaded!")
+        except Exception as e:
+            st.error(f"Error loading CSV: {e}")
+
     tri_df = st.data_editor(
         st.session_state.tri_data, 
         num_rows="dynamic", 
-        use_container_width=True,
+        width='stretch',
         column_config={
             "Dir": st.column_config.SelectboxColumn("Dir", options=["Left", "Right"])
         }
@@ -305,40 +513,75 @@ with tabs[4]:
             
             stations, results = calculate_simple_triangulation(tri_start_e, tri_start_n, tri_base_dist, tri_base_az, triangles)
             
-            st.subheader("Station Coordinates")
-            st_data = [{"Station": k, "Easting": v[0], "Northing": v[1]} for k, v in stations.items()]
-            st.dataframe(pd.DataFrame(st_data).style.format("{:.3f}"))
-            
-            st.subheader("Triangle Closures")
-            res_data = [{"Triangle": r['triangle'], "Error (sec)": r['error'], "Base": r['dist_base']} for r in results]
-            st.dataframe(pd.DataFrame(res_data))
-            
-            # Plot
-            fig, ax = plt.subplots()
-            for k, v in stations.items():
-                ax.plot(v[0], v[1], 'ro')
-                ax.text(v[0], v[1], f" {k}")
-            
-            # Draw lines (simplified)
-            pts = list(stations.values())
-            if len(pts) > 1:
-                # Draw base
-                ax.plot([pts[0][0], pts[1][0]], [pts[0][1], pts[1][1]], 'k-')
-                # Draw others roughly
-                for tri in triangles:
-                    if tri['p1'] in stations and tri['p3'] in stations:
-                        p1, p3 = stations[tri['p1']], stations[tri['p3']]
-                        ax.plot([p1[0], p3[0]], [p1[1], p3[1]], 'b--')
-                    if tri['p2'] in stations and tri['p3'] in stations:
-                        p2, p3 = stations[tri['p2']], stations[tri['p3']]
-                        ax.plot([p2[0], p3[0]], [p2[1], p3[1]], 'b--')
-
-            ax.set_aspect('equal')
-            ax.grid(True)
-            st.pyplot(fig)
+            st.session_state.tri_res = {
+                "stations": stations,
+                "results": results,
+                "triangles": triangles,
+                "epsg": tri_epsg
+            }
             
         except Exception as e:
             st.error(f"Error: {e}")
+
+    if "tri_res" in st.session_state:
+        res = st.session_state.tri_res
+        stations = res["stations"]
+        
+        st.subheader("Station Coordinates")
+        st_data = [{"Station": k, "Easting": v[0], "Northing": v[1]} for k, v in stations.items()]
+        st.dataframe(pd.DataFrame(st_data).style.format({
+            "Easting": "{:.3f}", "Northing": "{:.3f}"
+        }))
+        
+        st.subheader("Triangle Closures")
+        res_data = [{"Triangle": r['triangle'], "Error (sec)": r['error'], "Base": r['dist_base']} for r in res["results"]]
+        st.dataframe(pd.DataFrame(res_data))
+        
+        # Plot
+        fig, ax = plt.subplots()
+        for k, v in stations.items():
+            ax.plot(v[0], v[1], 'ro')
+            ax.text(v[0], v[1], f" {k}")
+        
+        # Draw lines (simplified)
+        pts = list(stations.values())
+        if len(pts) > 1:
+            # Draw base
+            ax.plot([pts[0][0], pts[1][0]], [pts[0][1], pts[1][1]], 'k-')
+            # Draw others roughly
+            for tri in res["triangles"]:
+                if tri['p1'] in stations and tri['p3'] in stations:
+                    p1, p3 = stations[tri['p1']], stations[tri['p3']]
+                    ax.plot([p1[0], p3[0]], [p1[1], p3[1]], 'b--')
+                if tri['p2'] in stations and tri['p3'] in stations:
+                    p2, p3 = stations[tri['p2']], stations[tri['p3']]
+                    ax.plot([p2[0], p3[0]], [p2[1], p3[1]], 'b--')
+
+        ax.set_aspect('equal')
+        ax.grid(True)
+        st.pyplot(fig)
+
+        # Exports
+        st.markdown("---")
+        st.subheader("Exports")
+        ec1, ec2 = st.columns(2)
+        with ec1:
+            stn_df = pd.DataFrame(st_data)
+            st.download_button("Download Stations (CSV)", stn_df.to_csv(index=False).encode('utf-8'), "triangulation_stations.csv", "text/csv")
+        with ec2:
+            if FOLIUM_AVAILABLE and PYPROJ_AVAILABLE:
+                try:
+                    local_pts = [(v[0], v[1]) for v in stations.values()]
+                    names = list(stations.keys())
+                    global_pts = convert_to_global(local_pts, res["epsg"])
+                    kml_str = generate_kml_string(global_pts, names)
+                    st.download_button("Download KML", kml_str, "triangulation.kml", "application/vnd.google-earth.kml+xml")
+                except Exception as e:
+                    st.warning(f"KML Generation Error: {e}")
+            elif not PYPROJ_AVAILABLE:
+                st.warning("KML export requires the 'pyproj' library.")
+            else:
+                st.warning("Folium not available for KML generation.")
 
 # ==========================================
 # TAB 6: GPS / CONVERSION
@@ -360,35 +603,56 @@ with tabs[5]:
     gps_df = st.data_editor(st.session_state.gps_data, num_rows="dynamic")
     
     if st.button("Convert Coords"):
-        try:
-            points = []
-            for _, row in gps_df.iterrows():
-                points.append((float(row["X/Lon"]), float(row["Y/Lat"]), float(row["Z"])))
-            
-            converted = convert_coords(points, from_epsg, to_epsg)
-            
-            res_df = gps_df.copy()
-            res_df["Out X"] = [c[0] for c in converted]
-            res_df["Out Y"] = [c[1] for c in converted]
-            res_df["Out Z"] = [c[2] for c in converted]
-            
-            st.dataframe(res_df)
-            
-            # Map Preview (if converting to WGS84 or if input is WGS84)
-            map_points = []
-            if from_epsg == 4326:
-                map_points = [(p[1], p[0]) for p in points] # Lat, Lon
-            elif to_epsg == 4326:
-                map_points = [(c[1], c[0]) for c in converted]
-            
-            if map_points and FOLIUM_AVAILABLE:
-                st.subheader("Map Preview")
-                avg_lat = sum(p[0] for p in map_points)/len(map_points)
-                avg_lon = sum(p[1] for p in map_points)/len(map_points)
-                m = folium.Map(location=[avg_lat, avg_lon], zoom_start=15)
-                for i, mp in enumerate(map_points):
-                    folium.Marker(mp, popup=f"P{i}").add_to(m)
-                st_folium(m, height=400, use_container_width=True)
+        if not PYPROJ_AVAILABLE:
+            st.error("Coordinate conversion requires the 'pyproj' library.")
+        else:
+            try:
+                points = []
+                for _, row in gps_df.iterrows():
+                    points.append((float(row["X/Lon"]), float(row["Y/Lat"]), float(row["Z"])))
                 
-        except Exception as e:
-            st.error(f"Conversion Error: {e}")
+                converted = convert_coords(points, from_epsg, to_epsg)
+                
+                res_df = gps_df.copy()
+                res_df["Out X"] = [c[0] for c in converted]
+                res_df["Out Y"] = [c[1] for c in converted]
+                res_df["Out Z"] = [c[2] for c in converted]
+                
+                st.session_state.gps_res = {
+                    "df": res_df,
+                    "points": points,
+                    "converted": converted,
+                    "from_epsg": from_epsg,
+                    "to_epsg": to_epsg
+                }
+                    
+            except Exception as e:
+                st.error(f"Conversion Error: {e}")
+
+    if "gps_res" in st.session_state:
+        res = st.session_state.gps_res
+        st.dataframe(res["df"])
+        
+        # Map Preview (if converting to WGS84 or if input is WGS84)
+        map_points = []
+        if res["from_epsg"] == 4326:
+            map_points = [(p[1], p[0]) for p in res["points"]] # Lat, Lon
+        elif res["to_epsg"] == 4326:
+            map_points = [(c[1], c[0]) for c in res["converted"]]
+        
+        if map_points and FOLIUM_AVAILABLE:
+            st.subheader("Map Preview")
+            avg_lat = sum(p[0] for p in map_points)/len(map_points)
+            avg_lon = sum(p[1] for p in map_points)/len(map_points)
+            m = folium.Map(location=[avg_lat, avg_lon], zoom_start=15)
+            folium.TileLayer(
+                tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}',
+                attr='Google',
+                name='Google Hybrid',
+                overlay=False,
+                control=True
+            ).add_to(m)
+            for i, mp in enumerate(map_points):
+                folium.Marker(mp, popup=f"P{i}").add_to(m)
+            folium.LayerControl().add_to(m)
+            st_folium(m, height=400, width='stretch')
